@@ -311,9 +311,28 @@ impl CalloraVault {
     }
 
     /// Set or clear the authorized caller for `deduct`/`batch_deduct` (owner only).
-    pub fn set_authorized_caller(env: Env, new_caller: Option<Address>) {
+    ///
+    /// # Parameters
+    /// - `caller` — must be the vault owner; signature required.
+    /// - `new_caller` — optional address to authorize for deduct operations.
+    ///   Must not be the vault address (consistent with `init`).
+    ///
+    /// # Panics
+    /// - `"unauthorized: owner only"` — `caller` is not the owner.
+    /// - `"authorized_caller cannot be vault address"` — `new_caller` is the vault itself.
+    pub fn set_authorized_caller(env: Env, caller: Address, new_caller: Option<Address>) {
+        caller.require_auth();
         let mut meta = Self::get_meta(env.clone());
-        meta.owner.require_auth();
+        assert!(caller == meta.owner, "unauthorized: owner only");
+        
+        // Validate new_caller is not the vault address (consistent with init)
+        if let Some(ac) = &new_caller {
+            assert!(
+                ac != &env.current_contract_address(),
+                "authorized_caller cannot be vault address"
+            );
+        }
+        
         let old = meta.authorized_caller.clone();
         meta.authorized_caller = new_caller.clone();
         env.storage().instance().set(&StorageKey::MetaKey, &meta);

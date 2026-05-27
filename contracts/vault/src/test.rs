@@ -748,7 +748,7 @@ fn set_authorized_caller_sets_and_emits_event() {
     let settlement = Address::generate(&env);
     client.set_settlement(&owner, &settlement);
 
-    client.set_authorized_caller(&Some(new_caller.clone()));
+    client.set_authorized_caller(&owner, &Some(new_caller.clone()));
 
     let events = env.events().all();
     let ev = events.last().expect("expected set_authorized_caller event");
@@ -2904,9 +2904,63 @@ fn test_set_authorized_caller() {
     env.mock_all_auths();
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
 
-    client.set_authorized_caller(&Some(auth_caller.clone()));
+    client.set_authorized_caller(&owner, &Some(auth_caller.clone()));
     let meta = client.get_meta();
     assert_eq!(meta.authorized_caller, Some(auth_caller));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: owner only")]
+fn set_authorized_caller_non_owner_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let non_owner = Address::generate(&env);
+    let new_caller = Address::generate(&env);
+    let (_, client) = create_vault(&env);
+    let (usdc, _, _) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+
+    // Attempt to set authorized caller as non-owner
+    client.set_authorized_caller(&non_owner, &Some(new_caller));
+}
+
+#[test]
+#[should_panic(expected = "authorized_caller cannot be vault address")]
+fn set_authorized_caller_vault_address_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, _) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+
+    // Attempt to set vault itself as authorized caller
+    client.set_authorized_caller(&owner, &Some(vault_address));
+}
+
+#[test]
+fn set_authorized_caller_clear_succeeds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let auth_caller = Address::generate(&env);
+    let (_, client) = create_vault(&env);
+    let (usdc, _, _) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+
+    // Set authorized caller
+    client.set_authorized_caller(&owner, &Some(auth_caller.clone()));
+    let meta = client.get_meta();
+    assert_eq!(meta.authorized_caller, Some(auth_caller));
+
+    // Clear authorized caller
+    client.set_authorized_caller(&owner, &None);
+    let meta2 = client.get_meta();
+    assert_eq!(meta2.authorized_caller, None);
 }
 
 #[test]
