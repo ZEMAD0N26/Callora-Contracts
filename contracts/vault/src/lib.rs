@@ -9,7 +9,7 @@
 /// - Owner withdrawals are ALLOWED (emergency recovery)
 /// - Admin distribute is ALLOWED (emergency recovery of untracked surplus)
 /// - Admin/owner configuration functions remain available
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone)]
@@ -50,6 +50,8 @@ pub enum StorageKey {
     PendingOwner,
     PendingAdmin,
     DepositorList,
+    /// Contract version marker (WASM hash) set by `upgrade`.
+    ContractVersion,
 }
 
 pub const DEFAULT_MAX_DEDUCT: i128 = i128::MAX;
@@ -808,6 +810,56 @@ impl CalloraVault {
             (old, metadata.clone()),
         );
         metadata
+    }
+
+    /// Admin-gated contract upgrade.
+    ///
+    /// Only the current admin may call. This will instruct the host to update
+    /// the current contract WASM to `new_wasm_hash` and persist the version marker.
+    ///
+    /// # Parameters
+    /// - `caller` — must be the vault admin; signature required.
+    /// - `new_wasm_hash` — 32-byte hash of the new WASM code to deploy.
+    ///
+    /// # Panics
+    /// - `"unauthorized: caller is not admin"` — `caller` is not the admin.
+    ///
+    /// # Events
+    /// Emits an `upgraded` event with the admin as topic and the new WASM hash as data.
+    ///
+    /// # Post-Upgrade Migration
+    /// After calling `upgrade`, you may need to invoke a separate `migrate` function
+    /// (if implemented in the new WASM) to update storage schema or perform data migrations.
+    /// See UPGRADE.md for the complete operational flow.
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        assert!(
+            caller == admin,
+            "unauthorized: caller is not admin"
+        );
+
+        // Perform the on-chain upgrade via the deployer interface.
+        // This is a host operation and may only succeed in the live environment.
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+
+        // Persist the version marker for on-chain queries.
+        env.storage()
+            .instance()
+            .set(&StorageKey::ContractVersion, &new_wasm_hash);
+
+        // Emit an event for indexers / audit logs.
+        env.events()
+            .publish((Symbol::new(&env, "upgraded"), admin), new_wasm_hash);
+    }
+
+    /// Read the stored contract version (WASM hash) as last set by `upgrade`.
+    ///
+    /// Returns `None` if no upgrade has been performed yet (initial deployment).
+    pub fn version(env: Env) -> Option<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::ContractVersion)
     }
 
     // -----------------------------------------------------------------------

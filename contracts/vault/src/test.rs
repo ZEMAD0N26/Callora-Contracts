@@ -5513,3 +5513,152 @@ fn instance_ttl_extended_on_deduct_and_batch_deduct() {
     env.ledger().set_sequence_number(seq + INSTANCE_BUMP_THRESHOLD - 1);
     assert_eq!(client.balance(), 300, "balance readable after ledger advance post-batch_deduct");
 }
+
+
+// ---------------------------------------------------------------------------
+// Upgrade tests (Issue #331)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upgrade_requires_admin() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    let new_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Non-admin attempt should fail
+    let res = client.try_upgrade(&attacker, &new_hash);
+    assert!(res.is_err(), "non-admin should not be able to upgrade");
+}
+
+#[test]
+fn upgrade_sets_version_and_emits_event() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    // Version should be None before any upgrade
+    assert_eq!(client.version(), None);
+
+    let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+    client.upgrade(&owner, &new_hash);
+
+    // version() should return stored value
+    let readback = client.version();
+    assert_eq!(readback, Some(new_hash.clone()));
+
+    // An `upgraded` event should have been emitted
+    let events = env.events().all();
+    let ev = events.last().unwrap();
+    assert_eq!(ev.0, vault_address);
+    
+    let name = Symbol::try_from_val(&env, &ev.1.get(0).unwrap()).unwrap();
+    assert_eq!(name, Symbol::new(&env, "upgraded"));
+    
+    let admin_topic: Address = ev.1.get(1).unwrap().into_val(&env);
+    assert_eq!(admin_topic, owner);
+    
+    let data: BytesN<32> = ev.2.into_val(&env);
+    assert_eq!(data, new_hash);
+}
+
+#[test]
+fn upgrade_non_owner_admin_succeeds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    // Transfer admin to new_admin
+    client.set_admin(&owner, &new_admin);
+    client.accept_admin();
+    assert_eq!(client.get_admin(), new_admin);
+
+    let new_hash = BytesN::from_array(&env, &[3u8; 32]);
+
+    // new_admin should be able to upgrade
+    client.upgrade(&new_admin, &new_hash);
+
+    let readback = client.version();
+    assert_eq!(readback, Some(new_hash));
+}
+
+#[test]
+fn upgrade_owner_not_admin_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    // Transfer admin to new_admin
+    client.set_admin(&owner, &new_admin);
+    client.accept_admin();
+    assert_eq!(client.get_admin(), new_admin);
+
+    let new_hash = BytesN::from_array(&env, &[4u8; 32]);
+
+    // owner (no longer admin) should fail
+    let res = client.try_upgrade(&owner, &new_hash);
+    assert!(res.is_err(), "owner without admin role should not be able to upgrade");
+}
+
+#[test]
+fn version_returns_none_before_first_upgrade() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    assert_eq!(client.version(), None);
+}
+
+#[test]
+fn upgrade_multiple_times_updates_version() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    let hash1 = BytesN::from_array(&env, &[5u8; 32]);
+    client.upgrade(&owner, &hash1);
+    assert_eq!(client.version(), Some(hash1.clone()));
+
+    let hash2 = BytesN::from_array(&env, &[6u8; 32]);
+    client.upgrade(&owner, &hash2);
+    assert_eq!(client.version(), Some(hash2.clone()));
+
+    let hash3 = BytesN::from_array(&env, &[7u8; 32]);
+    client.upgrade(&owner, &hash3);
+    assert_eq!(client.version(), Some(hash3));
+}
