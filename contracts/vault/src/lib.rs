@@ -731,11 +731,39 @@ impl CalloraVault {
     ///
     /// `deduct` and `batch_deduct` panic with `"settlement address not set"` until
     /// this is called.
+    /// Store the settlement contract address (admin only).
+    /// # Panics
+    /// - settlement cannot be vault address
+    /// - settlement cannot be usdc_token address
+    /// - settlement cannot equal revenue_pool address
     pub fn set_settlement(env: Env, caller: Address, settlement_address: Address) {
         caller.require_auth();
         let admin = Self::get_admin(env.clone());
         if caller != admin {
             panic!("unauthorized: caller is not admin");
+        }
+        assert!(
+            settlement_address != env.current_contract_address(),
+            "settlement cannot be vault address"
+        );
+        let usdc: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::UsdcToken)
+            .expect("vault not initialized");
+        assert!(
+            settlement_address != usdc,
+            "settlement cannot be usdc_token address"
+        );
+        if let Some(pool) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::RevenuePool)
+        {
+            assert!(
+                settlement_address != pool,
+                "settlement cannot equal revenue_pool address"
+            );
         }
         env.storage()
             .instance()
@@ -922,6 +950,9 @@ mod test;
 
 #[cfg(test)]
 mod test_init_hardening;
+
+#[cfg(test)]
+mod test_setter_validation;
 
 #[cfg(test)]
 mod test_views;
