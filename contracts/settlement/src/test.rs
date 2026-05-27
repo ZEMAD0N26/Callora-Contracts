@@ -13,7 +13,6 @@ mod settlement_tests {
         env.mock_all_auths();
         let admin = Address::generate(&env);
         let vault = Address::generate(&env);
-        let _third_party = Address::generate(&env);
         let addr = env.register(CalloraSettlement, ());
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
@@ -63,9 +62,60 @@ mod settlement_tests {
         assert_eq!(global_pool.total_balance, 0);
         assert_eq!(global_pool.last_updated, 1_700_000_000);
 
-        let all_balances = client.get_all_developer_balances();
+        let all_balances = client.get_all_developer_balances(&admin);
         assert_eq!(all_balances.len(), 0);
         assert_eq!(client.get_developer_balance(&developer), 0);
+    }
+    #[test]
+    #[should_panic(expected = "invalid config: admin and vault_address must be distinct")]
+    fn test_init_admin_equals_vault_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        // Passing the same address for admin and vault should be rejected.
+        client.init(&admin, &admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid config: admin cannot be the contract itself")]
+    fn test_init_admin_is_contract_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        // Passing the contract's own address as admin should be rejected.
+        client.init(&addr, &vault);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid config: vault_address cannot be the contract itself")]
+    fn test_init_vault_is_contract_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        // Passing the contract's own address as vault_address should be rejected.
+        client.init(&admin, &addr);
+    }
+
+    #[test]
+    fn test_init_requires_admin_signature() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        env.set_auths(&[]);
+        let result = client.try_init(&admin, &vault);
+        assert!(result.is_err(), "expected init to require the admin signature");
     }
 
     #[test]
@@ -143,7 +193,7 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
 
-        let all = client.get_all_developer_balances();
+        let all = client.get_all_developer_balances(&admin);
         assert_eq!(all.len(), 0);
     }
 
@@ -221,9 +271,25 @@ mod settlement_tests {
 
         client.receive_payment(&vault, &300i128, &false, &Some(dev1.clone()));
         client.receive_payment(&vault, &200i128, &false, &Some(dev2.clone()));
+        client.receive_payment(&vault, &150i128, &false, &Some(dev1.clone()));
 
-        let all = client.get_all_developer_balances();
+        let all = client.get_all_developer_balances(&admin);
         assert_eq!(all.len(), 2);
+        let mut dev1_seen = false;
+        let mut dev2_seen = false;
+        for balance in all.iter() {
+            if balance.address == dev1 {
+                assert_eq!(balance.balance, 450i128);
+                dev1_seen = true;
+            } else if balance.address == dev2 {
+                assert_eq!(balance.balance, 200i128);
+                dev2_seen = true;
+            } else {
+                panic!("unexpected developer in get_all_developer_balances");
+            }
+        }
+        assert!(dev1_seen);
+        assert!(dev2_seen);
     }
 
     #[test]
@@ -236,7 +302,7 @@ mod settlement_tests {
         let client = CalloraSettlementClient::new(&env, &addr);
         client.init(&admin, &vault);
 
-        let all = client.get_all_developer_balances();
+        let all = client.get_all_developer_balances(&admin);
         assert_eq!(all.len(), 0);
     }
 
@@ -317,6 +383,41 @@ mod settlement_tests {
 
         client.set_vault(&admin, &new_vault);
         assert_eq!(client.get_vault(), new_vault);
+    }
+
+    #[test]
+    fn test_set_vault_emits_event() {
+        use soroban_sdk::testutils::Events as _;
+        use soroban_sdk::{IntoVal, Symbol};
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let new_vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        client.set_vault(&admin, &new_vault);
+
+        let events = env.events().all();
+        let ev = events
+            .iter()
+            .find(|e| {
+                !e.1.is_empty() && {
+                    let t: Symbol = e.1.get(0).unwrap().into_val(&env);
+                    t == Symbol::new(&env, "vault_changed")
+                }
+            })
+            .expect("expected vault_changed event");
+
+        let topic1: Address = ev.1.get(1).unwrap().into_val(&env);
+        assert_eq!(topic1, admin);
+
+        let data: crate::VaultChangedEvent = ev.2.into_val(&env);
+        assert_eq!(data.old_vault, vault);
+        assert_eq!(data.new_vault, new_vault);
     }
 
     // â”€â”€ admin rotation edge cases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -578,6 +679,52 @@ mod settlement_tests {
     }
 
     #[test]
+    #[should_panic(expected = "pool balance overflow")]
+    fn test_receive_payment_to_pool_overflow_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        env.as_contract(&addr, || {
+            let inst = env.storage().instance();
+            let pool = crate::GlobalPool {
+                total_balance: i128::MAX,
+                last_updated: env.ledger().timestamp(),
+            };
+            inst.set(&Symbol::new(&env, "global_pool"), &pool);
+        });
+
+        client.receive_payment(&vault, &1i128, &true, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "developer balance overflow")]
+    fn test_receive_payment_to_developer_overflow_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let developer = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        env.as_contract(&addr, || {
+            let inst = env.storage().instance();
+            let mut balances: Map<Address, i128> =
+                inst.get(&Symbol::new(&env, "developer_balances")).unwrap();
+            balances.set(developer.clone(), i128::MAX);
+            inst.set(&Symbol::new(&env, "developer_balances"), &balances);
+        });
+
+        client.receive_payment(&vault, &1i128, &false, &Some(developer));
+    }
+
+    #[test]
     #[should_panic(expected = "developer address required when to_pool=false")]
     fn test_receive_payment_pool_false_no_developer() {
         let env = Env::default();
@@ -589,6 +736,21 @@ mod settlement_tests {
         client.init(&admin, &vault);
 
         client.receive_payment(&vault, &100i128, &false, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "developer address must be None when to_pool=true")]
+    fn test_receive_payment_pool_true_with_developer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let developer = Address::generate(&env);
+        let addr = env.register(CalloraSettlement, ());
+        let client = CalloraSettlementClient::new(&env, &addr);
+        client.init(&admin, &vault);
+
+        client.receive_payment(&vault, &100i128, &true, &Some(developer));
     }
 
     #[test]
@@ -853,7 +1015,7 @@ mod settlement_tests {
         assert_eq!(client.get_developer_balance(&developer), 500i128);
 
         // Admin can still view all balances
-        let all_balances = client.get_all_developer_balances();
+        let all_balances = client.get_all_developer_balances(&new_admin);
         assert_eq!(all_balances.len(), 1);
         assert_eq!(all_balances.get(0).unwrap().balance, 500i128);
     }
@@ -968,5 +1130,249 @@ mod settlement_tests {
         assert_eq!(client.get_global_pool().last_updated, 1_000);
         assert_eq!(client.get_global_pool().total_balance, 0);
         assert_eq!(client.get_developer_balance(&developer), 200i128);
+    }
+
+    // --- Authorization Matrix Tests ---
+
+    #[test]
+    fn test_set_admin_authorization_matrix() {
+        let (env, addr, admin, vault, third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let new_admin = Address::generate(&env);
+
+        // Admin can set admin
+        client.set_admin(&admin, &new_admin);
+
+        // Vault cannot set admin
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.set_admin(&vault, &new_admin);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
+
+        // Third party cannot set admin
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.set_admin(&third_party, &new_admin);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
+    }
+
+    #[test]
+    fn test_set_vault_authorization_matrix() {
+        let (env, addr, admin, vault, third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let new_vault = Address::generate(&env);
+
+        // Admin can set vault
+        client.set_vault(&admin, &new_vault);
+
+        // Vault cannot set vault
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.set_vault(&vault, &new_vault);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
+
+        // Third party cannot set vault
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.set_vault(&third_party, &new_vault);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
+    }
+
+    #[test]
+    fn test_accept_admin_authorization_matrix() {
+        let (env, addr, admin, _vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let new_admin = Address::generate(&env);
+
+        client.set_admin(&admin, &new_admin);
+
+        // Accept for new_admin (using mock_all_auths which is ON from setup_contract)
+        client.accept_admin();
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_get_all_developer_balances_authorization_matrix() {
+        let (env, addr, admin, vault, third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        // Admin can call
+        client.get_all_developer_balances(&admin);
+
+        // Vault cannot call
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.get_all_developer_balances(&vault);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
+
+        // Third party cannot call
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.get_all_developer_balances(&third_party);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("unauthorized: caller is not admin"));
+    }
+
+    // ── batch_receive_payment tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_batch_receive_payment_credits_multiple_developers() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev1 = Address::generate(&env);
+        let dev2 = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev1.clone(), 100i128));
+        items.push_back((dev2.clone(), 200i128));
+
+        client.batch_receive_payment(&vault, &items);
+
+        assert_eq!(client.get_developer_balance(&dev1), 100i128);
+        assert_eq!(client.get_developer_balance(&dev2), 200i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_accumulates_existing_balance() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        client.receive_payment(&vault, &50i128, &false, &Some(dev.clone()));
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 75i128));
+        client.batch_receive_payment(&vault, &items);
+
+        assert_eq!(client.get_developer_balance(&dev), 125i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_admin_caller_allowed() {
+        let (env, addr, admin, _vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 300i128));
+        client.batch_receive_payment(&admin, &items);
+
+        assert_eq!(client.get_developer_balance(&dev), 300i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_empty_batch() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        let items: soroban_sdk::Vec<(Address, i128)> = soroban_sdk::Vec::new(&env);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err())
+            .contains("batch_receive_payment requires at least one item"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_oversized_batch() {
+        use crate::MAX_BATCH_SIZE;
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            items.push_back((dev.clone(), 1i128));
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("batch too large"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_zero_amount() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 0i128));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("amount must be positive"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_rejects_negative_amount() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), -1i128));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&vault, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err()).contains("amount must be positive"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_unauthorized_caller_rejected() {
+        let (env, addr, _admin, _vault, third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 100i128));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            client.batch_receive_payment(&third_party, &items);
+        }));
+        assert!(result.is_err());
+        assert!(panic_message(result.unwrap_err())
+            .contains("unauthorized: caller must be vault or admin"));
+    }
+
+    #[test]
+    fn test_batch_receive_payment_single_item() {
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+        let dev = Address::generate(&env);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        items.push_back((dev.clone(), 999i128));
+        client.batch_receive_payment(&vault, &items);
+
+        assert_eq!(client.get_developer_balance(&dev), 999i128);
+    }
+
+    #[test]
+    fn test_batch_receive_payment_max_batch_size_accepted() {
+        use crate::MAX_BATCH_SIZE;
+        let (env, addr, _admin, vault, _third_party) = setup_contract();
+        let client = CalloraSettlementClient::new(&env, &addr);
+
+        let mut items = soroban_sdk::Vec::new(&env);
+        let mut devs = std::vec::Vec::new();
+        for _ in 0..MAX_BATCH_SIZE {
+            let dev = Address::generate(&env);
+            devs.push(dev.clone());
+            items.push_back((dev, 1i128));
+        }
+        client.batch_receive_payment(&vault, &items);
+
+        for dev in &devs {
+            assert_eq!(client.get_developer_balance(dev), 1i128);
+        }
     }
 }
