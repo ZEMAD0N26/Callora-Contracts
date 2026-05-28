@@ -177,6 +177,75 @@ impl RevenuePool {
             .publish((Symbol::new(&env, "admin_transfer_completed"), pending), ());
     }
 
+    fn require_not_paused(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&Symbol::new(env, PAUSED_KEY))
+            .unwrap_or(false)
+        {
+            panic!("{}", ERR_PAUSED);
+        }
+    }
+
+    /// Pause the revenue pool, blocking `distribute` and `batch_distribute`.
+    ///
+    /// Only the admin may call. Admin rotation remains available while paused.
+    ///
+    /// # Panics
+    /// * If the caller is not the current admin.
+    /// * If the pool is already paused.
+    ///
+    /// # Events
+    /// Emits a `pause_set` event with `caller` as a topic and `true` as data.
+    pub fn pause(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        assert!(!Self::is_paused(env.clone()), "revenue pool already paused");
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PAUSED_KEY), &true);
+        env.events()
+            .publish((Symbol::new(&env, "pause_set"), caller), true);
+    }
+
+    /// Unpause the revenue pool, restoring `distribute` and `batch_distribute`.
+    ///
+    /// Only the admin may call.
+    ///
+    /// # Panics
+    /// * If the caller is not the current admin.
+    /// * If the pool is not currently paused.
+    ///
+    /// # Events
+    /// Emits a `pause_set` event with `caller` as a topic and `false` as data.
+    pub fn unpause(env: Env, caller: Address) {
+        caller.require_auth();
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        assert!(Self::is_paused(env.clone()), "revenue pool not paused");
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PAUSED_KEY), &false);
+        env.events()
+            .publish((Symbol::new(&env, "pause_set"), caller), false);
+    }
+
+    /// Return `true` if the revenue pool is currently paused, `false` otherwise.
+    ///
+    /// Defaults to `false` when the pause key is absent (i.e. never paused).
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&Symbol::new(&env, PAUSED_KEY))
+            .unwrap_or(false)
+    }
+
     /// **Note**: This function is an **event-only helper**. It is **not** a substitute
     /// for real token settlement and does **not** move any tokens. It exists purely
     /// for event emission / indexer alignment when configured.
@@ -270,6 +339,7 @@ impl RevenuePool {
     /// Emits a `distribute` event with `to` as a topic and `amount` as data.
     pub fn distribute(env: Env, caller: Address, to: Address, amount: i128) {
         caller.require_auth();
+        Self::require_not_paused(&env);
         let admin = Self::get_admin(env.clone());
         if caller != admin {
             panic!("{}", ERR_UNAUTHORIZED);
@@ -361,6 +431,7 @@ impl RevenuePool {
     pub fn batch_distribute(env: Env, caller: Address, payments: Vec<(Address, i128)>) {
         // Phase 0: Authorization
         caller.require_auth();
+        Self::require_not_paused(&env);
         let admin = Self::get_admin(env.clone());
         if caller != admin {
             panic!("{}", ERR_UNAUTHORIZED);
