@@ -748,7 +748,7 @@ fn set_authorized_caller_sets_and_emits_event() {
     let settlement = Address::generate(&env);
     client.set_settlement(&owner, &settlement);
 
-    client.set_authorized_caller(&Some(new_caller.clone()));
+    client.set_authorized_caller(&owner, &Some(new_caller.clone()));
 
     let events = env.events().all();
     let ev = events.last().expect("expected set_authorized_caller event");
@@ -1539,6 +1539,83 @@ fn withdraw_to_insufficient_balance_fails() {
 
     let result = client.try_withdraw_to(&recipient, &500);
     assert!(result.is_err(), "expected error for insufficient balance");
+}
+
+#[test]
+#[should_panic(expected = "cannot withdraw to vault address")]
+fn withdraw_to_vault_address_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 1000);
+    client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
+
+    // Attempt to withdraw to the vault itself
+    client.withdraw_to(&vault_address, &100);
+}
+
+#[test]
+#[should_panic(expected = "cannot withdraw to token address")]
+fn withdraw_to_token_address_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 1000);
+    client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
+
+    // Attempt to withdraw to the USDC token contract
+    client.withdraw_to(&usdc, &100);
+}
+
+#[test]
+fn withdraw_to_while_paused_succeeds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, usdc_client, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 1000);
+    client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
+
+    // Pause the vault
+    client.pause(&owner);
+    assert!(client.is_paused());
+
+    // Withdraw should still work while paused (emergency recovery)
+    let remaining = client.withdraw_to(&recipient, &300);
+    assert_eq!(remaining, 700);
+    assert_eq!(client.balance(), 700);
+    assert_eq!(usdc_client.balance(&recipient), 300);
+}
+
+#[test]
+fn withdraw_while_paused_succeeds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, usdc_client, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 1000);
+    client.init(&owner, &usdc, &Some(1000), &None, &None, &None, &None);
+
+    // Pause the vault
+    client.pause(&owner);
+    assert!(client.is_paused());
+
+    // Withdraw should still work while paused (emergency recovery)
+    let remaining = client.withdraw(&200);
+    assert_eq!(remaining, 800);
+    assert_eq!(client.balance(), 800);
+    assert_eq!(usdc_client.balance(&owner), 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -2827,9 +2904,63 @@ fn test_set_authorized_caller() {
     env.mock_all_auths();
     client.init(&owner, &usdc, &None, &None, &None, &None, &None);
 
-    client.set_authorized_caller(&Some(auth_caller.clone()));
+    client.set_authorized_caller(&owner, &Some(auth_caller.clone()));
     let meta = client.get_meta();
     assert_eq!(meta.authorized_caller, Some(auth_caller));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized: owner only")]
+fn set_authorized_caller_non_owner_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let non_owner = Address::generate(&env);
+    let new_caller = Address::generate(&env);
+    let (_, client) = create_vault(&env);
+    let (usdc, _, _) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+
+    // Attempt to set authorized caller as non-owner
+    client.set_authorized_caller(&non_owner, &Some(new_caller));
+}
+
+#[test]
+#[should_panic(expected = "authorized_caller cannot be vault address")]
+fn set_authorized_caller_vault_address_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, _) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+
+    // Attempt to set vault itself as authorized caller
+    client.set_authorized_caller(&owner, &Some(vault_address));
+}
+
+#[test]
+fn set_authorized_caller_clear_succeeds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let auth_caller = Address::generate(&env);
+    let (_, client) = create_vault(&env);
+    let (usdc, _, _) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+
+    // Set authorized caller
+    client.set_authorized_caller(&owner, &Some(auth_caller.clone()));
+    let meta = client.get_meta();
+    assert_eq!(meta.authorized_caller, Some(auth_caller));
+
+    // Clear authorized caller
+    client.set_authorized_caller(&owner, &None);
+    let meta2 = client.get_meta();
+    assert_eq!(meta2.authorized_caller, None);
 }
 
 #[test]
@@ -5381,4 +5512,153 @@ fn instance_ttl_extended_on_deduct_and_batch_deduct() {
     let seq = env.ledger().sequence();
     env.ledger().set_sequence_number(seq + INSTANCE_BUMP_THRESHOLD - 1);
     assert_eq!(client.balance(), 300, "balance readable after ledger advance post-batch_deduct");
+}
+
+
+// ---------------------------------------------------------------------------
+// Upgrade tests (Issue #331)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upgrade_requires_admin() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    let new_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Non-admin attempt should fail
+    let res = client.try_upgrade(&attacker, &new_hash);
+    assert!(res.is_err(), "non-admin should not be able to upgrade");
+}
+
+#[test]
+fn upgrade_sets_version_and_emits_event() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    // Version should be None before any upgrade
+    assert_eq!(client.version(), None);
+
+    let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+
+    client.upgrade(&owner, &new_hash);
+
+    // version() should return stored value
+    let readback = client.version();
+    assert_eq!(readback, Some(new_hash.clone()));
+
+    // An `upgraded` event should have been emitted
+    let events = env.events().all();
+    let ev = events.last().unwrap();
+    assert_eq!(ev.0, vault_address);
+    
+    let name = Symbol::try_from_val(&env, &ev.1.get(0).unwrap()).unwrap();
+    assert_eq!(name, Symbol::new(&env, "upgraded"));
+    
+    let admin_topic: Address = ev.1.get(1).unwrap().into_val(&env);
+    assert_eq!(admin_topic, owner);
+    
+    let data: BytesN<32> = ev.2.into_val(&env);
+    assert_eq!(data, new_hash);
+}
+
+#[test]
+fn upgrade_non_owner_admin_succeeds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    // Transfer admin to new_admin
+    client.set_admin(&owner, &new_admin);
+    client.accept_admin();
+    assert_eq!(client.get_admin(), new_admin);
+
+    let new_hash = BytesN::from_array(&env, &[3u8; 32]);
+
+    // new_admin should be able to upgrade
+    client.upgrade(&new_admin, &new_hash);
+
+    let readback = client.version();
+    assert_eq!(readback, Some(new_hash));
+}
+
+#[test]
+fn upgrade_owner_not_admin_fails() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    // Transfer admin to new_admin
+    client.set_admin(&owner, &new_admin);
+    client.accept_admin();
+    assert_eq!(client.get_admin(), new_admin);
+
+    let new_hash = BytesN::from_array(&env, &[4u8; 32]);
+
+    // owner (no longer admin) should fail
+    let res = client.try_upgrade(&owner, &new_hash);
+    assert!(res.is_err(), "owner without admin role should not be able to upgrade");
+}
+
+#[test]
+fn version_returns_none_before_first_upgrade() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    assert_eq!(client.version(), None);
+}
+
+#[test]
+fn upgrade_multiple_times_updates_version() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let (vault_address, client) = create_vault(&env);
+    let (usdc, _, usdc_admin) = create_usdc(&env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, 100);
+    client.init(&owner, &usdc, &Some(100), &None, &None, &None, &None);
+
+    let hash1 = BytesN::from_array(&env, &[5u8; 32]);
+    client.upgrade(&owner, &hash1);
+    assert_eq!(client.version(), Some(hash1.clone()));
+
+    let hash2 = BytesN::from_array(&env, &[6u8; 32]);
+    client.upgrade(&owner, &hash2);
+    assert_eq!(client.version(), Some(hash2.clone()));
+
+    let hash3 = BytesN::from_array(&env, &[7u8; 32]);
+    client.upgrade(&owner, &hash3);
+    assert_eq!(client.version(), Some(hash3));
 }
