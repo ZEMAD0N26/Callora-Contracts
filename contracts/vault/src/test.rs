@@ -5979,3 +5979,209 @@ fn upgrade_multiple_times_updates_version() {
     client.upgrade(&owner, &hash3);
     assert_eq!(client.version(), Some(hash3));
 }
+
+// ---------------------------------------------------------------------------
+// BUDGET MEASUREMENT TESTS — for benchmarking and cost analysis
+// ---------------------------------------------------------------------------
+
+/// Captures CPU, memory, and ledger read/write metrics from Soroban budget.
+#[derive(Clone)]
+struct BudgetSnapshot {
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    ledger_read_bytes: u64,
+    ledger_write_bytes: u64,
+}
+
+impl BudgetSnapshot {
+    /// Capture the current budget state from the environment.
+    fn capture(env: &Env) -> Self {
+        let ce = env.cost_estimate();
+        let budget = ce.budget();
+        Self {
+            cpu_instructions: budget.get_cpu_insns_consumed().unwrap_or_default(),
+            memory_bytes: budget.get_mem_bytes_consumed().unwrap_or_default(),
+            ledger_read_bytes: ce.resources().read_bytes as u64,
+            ledger_write_bytes: ce.resources().write_bytes as u64,
+        }
+    }
+
+    /// Calculate delta between two snapshots (after - before).
+    fn delta(&self, before: &BudgetSnapshot) -> BudgetSnapshot {
+        BudgetSnapshot {
+            cpu_instructions: self.cpu_instructions.saturating_sub(before.cpu_instructions),
+            memory_bytes: self.memory_bytes.saturating_sub(before.memory_bytes),
+            ledger_read_bytes: self.ledger_read_bytes.saturating_sub(before.ledger_read_bytes),
+            ledger_write_bytes: self.ledger_write_bytes.saturating_sub(before.ledger_write_bytes),
+        }
+    }
+}
+
+/// Helper function to set up a fully initialized vault with settlement and sufficient balance.
+fn setup_vault_for_deduct(env: &Env, initial_balance: i128) -> (Address, CalloraVaultClient) {
+    let owner = Address::generate(env);
+    let (vault_address, client) = create_vault(env);
+    let (usdc, _, usdc_admin) = create_usdc(env, &owner);
+
+    env.mock_all_auths();
+    fund_vault(&usdc_admin, &vault_address, initial_balance);
+    client.init(&owner, &usdc, &Some(initial_balance), &None, &None, &None, &None);
+    let settlement = Address::generate(env);
+    client.set_settlement(&owner, &settlement);
+
+    (owner, client)
+}
+
+/// Benchmark: measure the cost of a single `deduct` operation.
+///
+/// Prints CPU instructions, memory, ledger read/write metrics in CSV format for analysis.
+#[test]
+#[ignore]
+fn budget_measure_single_deduct() {
+    let env = Env::default();
+    let (owner, client) = setup_vault_for_deduct(&env, 100_000_000);
+
+    let before = BudgetSnapshot::capture(&env);
+    client.deduct(&owner, &1_000_000, &None);
+    let after = BudgetSnapshot::capture(&env);
+
+    let delta = after.delta(&before);
+    std::println!(
+        "BUDGET_SINGLE_DEDUCT,cpu_instructions,{},memory_bytes,{},ledger_read_bytes,{},ledger_write_bytes,{}",
+        delta.cpu_instructions, delta.memory_bytes, delta.ledger_read_bytes, delta.ledger_write_bytes
+    );
+}
+
+/// Benchmark: measure the cost of `batch_deduct` with batch size = 1.
+///
+/// For comparison: a batch of 1 item should have similar cost to single deduct,
+/// with possible overhead from the batch validation loop.
+#[test]
+#[ignore]
+fn budget_measure_batch_deduct_size_1() {
+    let env = Env::default();
+    let (owner, client) = setup_vault_for_deduct(&env, 100_000_000);
+
+    let items = soroban_sdk::vec![
+        &env,
+        DeductItem {
+            amount: 1_000_000,
+            request_id: None
+        }
+    ];
+
+    let before = BudgetSnapshot::capture(&env);
+    client.batch_deduct(&owner, &items);
+    let after = BudgetSnapshot::capture(&env);
+
+    let delta = after.delta(&before);
+    std::println!(
+        "BUDGET_BATCH_DEDUCT_SIZE_1,cpu_instructions,{},memory_bytes,{},ledger_read_bytes,{},ledger_write_bytes,{}",
+        delta.cpu_instructions, delta.memory_bytes, delta.ledger_read_bytes, delta.ledger_write_bytes
+    );
+}
+
+/// Benchmark: measure the cost of `batch_deduct` with batch size = 10.
+///
+/// Captures the incremental cost of processing 10 items in a single call.
+#[test]
+#[ignore]
+fn budget_measure_batch_deduct_size_10() {
+    let env = Env::default();
+    let (owner, client) = setup_vault_for_deduct(&env, 100_000_000);
+
+    let mut items = soroban_sdk::Vec::new(&env);
+    for _ in 0..10 {
+        items.push_back(DeductItem {
+            amount: 1_000_000,
+            request_id: Some(Symbol::new(&env, "req")),
+        });
+    }
+
+    let before = BudgetSnapshot::capture(&env);
+    client.batch_deduct(&owner, &items);
+    let after = BudgetSnapshot::capture(&env);
+
+    let delta = after.delta(&before);
+    std::println!(
+        "BUDGET_BATCH_DEDUCT_SIZE_10,cpu_instructions,{},memory_bytes,{},ledger_read_bytes,{},ledger_write_bytes,{}",
+        delta.cpu_instructions, delta.memory_bytes, delta.ledger_read_bytes, delta.ledger_write_bytes
+    );
+}
+
+/// Benchmark: measure the cost of `batch_deduct` with batch size = 25.
+///
+/// Tests mid-range batching to identify potential scaling inflection points.
+#[test]
+#[ignore]
+fn budget_measure_batch_deduct_size_25() {
+    let env = Env::default();
+    let (owner, client) = setup_vault_for_deduct(&env, 100_000_000);
+
+    let mut items = soroban_sdk::Vec::new(&env);
+    for _ in 0..25 {
+        items.push_back(DeductItem {
+            amount: 500_000,
+            request_id: Some(Symbol::new(&env, "req")),
+        });
+    }
+
+    let before = BudgetSnapshot::capture(&env);
+    client.batch_deduct(&owner, &items);
+    let after = BudgetSnapshot::capture(&env);
+
+    let delta = after.delta(&before);
+    std::println!(
+        "BUDGET_BATCH_DEDUCT_SIZE_25,cpu_instructions,{},memory_bytes,{},ledger_read_bytes,{},ledger_write_bytes,{}",
+        delta.cpu_instructions, delta.memory_bytes, delta.ledger_read_bytes, delta.ledger_write_bytes
+    );
+}
+
+/// Benchmark: measure the cost of `batch_deduct` with batch size = 50 (MAX_BATCH_SIZE).
+///
+/// Tests the maximum allowed batch size to understand the upper-bound cost.
+#[test]
+#[ignore]
+fn budget_measure_batch_deduct_size_50() {
+    let env = Env::default();
+    let (owner, client) = setup_vault_for_deduct(&env, 100_000_000);
+
+    let mut items = soroban_sdk::Vec::new(&env);
+    for _ in 0..50 {
+        items.push_back(DeductItem {
+            amount: 300_000,
+            request_id: Some(Symbol::new(&env, "req")),
+        });
+    }
+
+    let before = BudgetSnapshot::capture(&env);
+    client.batch_deduct(&owner, &items);
+    let after = BudgetSnapshot::capture(&env);
+
+    let delta = after.delta(&before);
+    std::println!(
+        "BUDGET_BATCH_DEDUCT_SIZE_50,cpu_instructions,{},memory_bytes,{},ledger_read_bytes,{},ledger_write_bytes,{}",
+        delta.cpu_instructions, delta.memory_bytes, delta.ledger_read_bytes, delta.ledger_write_bytes
+    );
+}
+
+/// Run all budget benchmarks in sequence.
+///
+/// This is a convenience function for easily running the entire benchmark suite.
+/// Execute with: `cargo test budget_measure_all -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn budget_measure_all() {
+    std::println!("\n=== VAULT BUDGET MEASUREMENT SUITE ===\n");
+    
+    // Single deduct baseline
+    budget_measure_single_deduct();
+    
+    // Batch deduct at various sizes
+    budget_measure_batch_deduct_size_1();
+    budget_measure_batch_deduct_size_10();
+    budget_measure_batch_deduct_size_25();
+    budget_measure_batch_deduct_size_50();
+    
+    std::println!("\n=== END VAULT BUDGET MEASUREMENTS ===\n");
+}
